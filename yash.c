@@ -14,6 +14,13 @@
 #include <unistd.h>
 
 int isCommand( char* tkn ) {
+    if (
+        strcmp(tkn, "fg") == 0 ||
+        strcmp(tkn, "bg") == 0 ||
+        strcmp(tkn, "jobs") == 0
+        ) {
+        return 1;
+    }
     char* path_env = getenv("PATH");
     if (path_env == NULL) {
         // PATH NOT FOUND
@@ -51,10 +58,8 @@ int tokenType( char* tkn ) {
         return 0;
     } else if ( isFileRedirector(tkn) ) {
         return 2;
-    } else if ( isPipe(tkn) ) {
+    } else if ( strcmp(tkn, "|") == 0 ) {
         return 3;
-    } else if ( isJobControl(tkn) ) {
-        return 4;
     } else {
         return 1;
     }
@@ -81,18 +86,22 @@ int main(int argc, char *argv[]) {
 
         char* token = strtok(usrInputCopy, " ");
         if (token != NULL) {
+            int commandSaved = 0;
             if (isCommand(token)) {
-                printf("Command: %s\n", token);
+                command = strdup(token);
+                commandExecuted = 0;
+                commandSaved = 1;
             }else {
                 continue;
             }
 
-            int commandSaved = 0;
+
             while ((token = strtok(NULL, " "))) {
                 switch (tokenType(token)) {
                     case 0: // Command
                         if (!commandSaved) {
                             command = strdup(token);
+                            commandExecuted = 0;
                             commandSaved = 1;
                             break;
                         }
@@ -103,17 +112,25 @@ int main(int argc, char *argv[]) {
                         break;
                     case 3: // Piping
                         break;
-                    case 4: // Job Control
-                        break;
                     default:
                         // invalid token, should exit this line iteration
                 }
                 printf("Args: %s\n", token);
             }
-            if (!commandExecuted) {
-                // CREATE FORK AND THEN EXEC
-                execvp(command, cmdArgs);
+            if (!commandExecuted && commandSaved) {
+                // Determine if shell command
+                if ( strcmp(command, "fg") == 0) {
+
+                }else if (strcmp(command, "bg") == 0 ) {
+
+                }else if (strcmp(command, "jobs") ==0 ) {
+
+                } else {
+                    // CREATE FORK AND THEN EXEC
+                    // execvp(command, cmdArgs);
+                }
                 commandSaved = 0;
+                commandExecuted = 1;
             }
         }
 
