@@ -14,17 +14,46 @@
 #include <unistd.h>
 
 int isCommand( char* tkn ) {
-    if (
-        strcmp(tkn, "echo") == 0 ||
-        strcmp(tkn, "ls") == 0
-        ) {
+    char* path_env = getenv("PATH");
+    if (path_env == NULL) {
+        // PATH NOT FOUND
+        exit(1);
+    }
+    char* directory = strtok(path_env, ":");
+    while ( directory != NULL) {
+        const int sizeOfDirectory = (int)(strlen(directory) + strlen(tkn) + 2); // +2 for '/' and \0
+        char cmdDirectory[sizeOfDirectory];
+        snprintf(cmdDirectory, sizeOfDirectory, "%s/%s", directory, tkn);
+
+        if (access(cmdDirectory, X_OK)) {
+            return 1;
+        }
+
+        directory = strtok(NULL, ":");
+    }
+    //free(path_env);
+    return 0;
+}
+
+int tokenType( char* tkn ) {
+    if ( isCommand(tkn)) {
+        return 0;
+    } else if ( isFileRedirector(tkn) ) {
+        return 2;
+    } else if ( isPipe(tkn) ) {
+        return 3;
+    } else if ( isJobControl(tkn) ) {
+        return 4;
+    } else {
         return 1;
     }
-    return 0;
 }
 
 int main(int argc, char *argv[]) {
     char* usrInput;
+    int commandExecuted = 0;
+    char* command;
+    char** cmdArgs;
 
     while ((usrInput = readline("# "))) { // if user enters ^D
         if (usrInput[0] == '\0') {
@@ -41,9 +70,39 @@ int main(int argc, char *argv[]) {
 
         char* token = strtok(usrInputCopy, " ");
         if (token != NULL) {
-            printf("Command: %s\n", token);
+            if (isCommand(token)) {
+                printf("Command: %s\n", token);
+            }else {
+                continue;
+            }
+
+            int commandSaved = 0;
             while ((token = strtok(NULL, " "))) {
+                switch (tokenType(token)) {
+                    case 0: // Command
+                        if (!commandSaved) {
+                            command = strdup(token);
+                            commandSaved = 1;
+                            break;
+                        }
+                    case 1: // Argument
+
+                        break;
+                    case 2: // File redirection
+                        break;
+                    case 3: // Piping
+                        break;
+                    case 4: // Job Control
+                        break;
+                    default:
+                        // invalid token, should exit this line iteration
+                }
                 printf("Args: %s\n", token);
+            }
+            if (!commandExecuted) {
+                // CREATE FORK AND THEN EXEC
+                execvp(command, cmdArgs);
+                commandSaved = 0;
             }
         }
 
