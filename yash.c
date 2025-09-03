@@ -35,6 +35,17 @@ int isCommand( char* tkn ) {
     return 0;
 }
 
+int isFileRedirector( char* tkn ) {
+    if (
+        strcmp(tkn, "<") == 0 ||
+        strcmp(tkn, ">") == 0 ||
+        strcmp(tkn, "2>") == 0
+        ) {
+        return 1;
+    }
+    return 0;
+}
+
 int tokenType( char* tkn ) {
     if ( isCommand(tkn)) {
         return 0;
