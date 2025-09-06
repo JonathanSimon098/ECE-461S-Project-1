@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <readline/readline.h>
 #include <readline/history.h>
+#include <sys/wait.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -24,21 +25,28 @@ int isCommand( char* tkn ) {
     char* path_env = getenv("PATH");
     if (path_env == NULL) {
         // PATH NOT FOUND
-        exit(1);
+        return -1;
     }
-    char* directory = strtok(path_env, ":");
+    char* path_copy = strdup(path_env);
+    if (path_copy == NULL ) {
+        return -1;
+    }
+    char* savePtr;
+    char* directory;
+    directory = strtok_r(path_copy, ":", &savePtr);
     while ( directory != NULL) {
         const int sizeOfDirectory = (int)(strlen(directory) + strlen(tkn) + 2); // +2 for '/' and \0
         char cmdDirectory[sizeOfDirectory];
         snprintf(cmdDirectory, sizeOfDirectory, "%s/%s", directory, tkn);
 
-        if (access(cmdDirectory, X_OK)) {
+        if (access(cmdDirectory, X_OK) == 0) {
+            free(path_copy);
             return 1;
         }
 
-        directory = strtok(NULL, ":");
+        directory = strtok_r(NULL, ":", &savePtr);
     }
-    //free(path_env);
+    free(path_copy);
     return 0;
 }
 
@@ -53,23 +61,13 @@ int isFileRedirector( char* tkn ) {
     return 0;
 }
 
-int tokenType( char* tkn ) {
-    if ( isCommand(tkn)) {
-        return 0;
-    } else if ( isFileRedirector(tkn) ) {
-        return 2;
-    } else if ( strcmp(tkn, "|") == 0 ) {
-        return 3;
-    } else {
-        return 1;
-    }
-}
-
 int main(int argc, char *argv[]) {
     char* usrInput;
     int commandExecuted = 0;
-    char* command;
-    char** cmdArgs;
+    char** cmdArgs = calloc(10, sizeof(char*));
+    if (cmdArgs == NULL) exit(1); // failed to allocate. exit.
+
+    int cmdArgsCount = 10;
 
     while ((usrInput = readline("# "))) { // if user enters ^D
         if (usrInput[0] == '\0') {
@@ -81,42 +79,71 @@ int main(int argc, char *argv[]) {
         if (usrInputCopy == NULL) {
             printf("Memory failed to allocate.\n");
             free(usrInput);
+            free(cmdArgs);
             return 1;
         }
 
         char* token = strtok(usrInputCopy, " ");
-        if (token != NULL) {
+        char* command = strdup(token);
+        if (token != NULL && command != NULL) {
+            int cmdArgsIndex = 0;
             int commandSaved = 0;
-            if (isCommand(token)) {
-                command = strdup(token);
+            int isCmd = isCommand(token);
+            if ( isCmd == 1 ) {
+                cmdArgs[cmdArgsIndex++] = command;
                 commandExecuted = 0;
                 commandSaved = 1;
-            }else {
+            } else if (isCmd == -1) {
+                free(command);
+                free(cmdArgs);
+                free(usrInputCopy);
+                free(usrInput);
+                exit(1);
+            } else {
+                free(command);
+                free(usrInputCopy);
+                free(usrInput);
                 continue;
             }
 
 
             while ((token = strtok(NULL, " "))) {
-                switch (tokenType(token)) {
-                    case 0: // Command
-                        if (!commandSaved) {
-                            command = strdup(token);
-                            commandExecuted = 0;
-                            commandSaved = 1;
-                            break;
+                isCmd = isCommand(token);
+                if ( isCmd == 1 && !commandSaved) {
+                    command = strdup(token);
+                    if (command == NULL) exit(1);
+                    cmdArgs[cmdArgsIndex++] = command;
+                    commandExecuted = 0;
+                    commandSaved = 1;
+                } else if (isCmd == -1) { // ERROR occurred
+                    free(usrInputCopy);
+                    free(usrInput);
+                    free(cmdArgs);
+                    exit(1);
+                } else if ( isFileRedirector(token) ) {
+                    // TODO: Add file redirection logic
+                } else if ( strcmp(token, "|") == 0 ) {
+                    // TODO: Add piping logic
+                } else {
+                    cmdArgsIndex++;
+                    if (cmdArgsIndex > (cmdArgsCount - 1)) { // -1 for NULL
+                        cmdArgsCount+=5;
+                        char** temp = realloc(cmdArgs, sizeof(char*) * (cmdArgsCount)); // WARNING: Allocated memory is leaked
+                        if (temp == NULL) {
+                            for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
+                            free(cmdArgs);
+                            free(usrInputCopy);
+                            free(usrInput);
+                            exit(1);
                         }
-                    case 1: // Argument
+                        cmdArgs = temp;
 
-                        break;
-                    case 2: // File redirection
-                        break;
-                    case 3: // Piping
-                        break;
-                    default:
-                        // invalid token, should exit this line iteration
+                    }
+                    char* arg_copy = strdup(token);
+                    cmdArgs[cmdArgsIndex - 1] = arg_copy;
                 }
-                printf("Args: %s\n", token);
             }
+            cmdArgs[cmdArgsIndex] = NULL;
             if (!commandExecuted && commandSaved) {
                 // Determine if shell command
                 if ( strcmp(command, "fg") == 0) {
@@ -127,15 +154,20 @@ int main(int argc, char *argv[]) {
 
                 } else {
                     // CREATE FORK AND THEN EXEC
-                    // execvp(command, cmdArgs);
-                }
-                commandSaved = 0;
-                commandExecuted = 1;
-            }
-        }
+                    const pid_t pid = fork();
 
+                    if ( pid == 0 ) {
+                        /* CHILD */
+                        execvp(command, cmdArgs);
+                    }
+                    wait(NULL);
+                }
+            }
+            for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
+        }
         free(usrInputCopy);
         free(usrInput);
     }
+    free(cmdArgs);
     return 0;
 }
