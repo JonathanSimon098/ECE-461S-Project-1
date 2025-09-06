@@ -10,6 +10,9 @@
 #include <signal.h>
 #include <readline/readline.h>
 #include <readline/history.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <sys/wait.h>
 #include <string.h>
 #include <unistd.h>
@@ -106,7 +109,13 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-
+            int saved_stdin = dup(STDIN_FILENO);
+            int saved_stdout = dup(STDOUT_FILENO);
+            int saved_stderr = dup(STDERR_FILENO);
+            int fd;
+            int stdin_redirect = 0;
+            int stdout_redirect = 0;
+            int stderr_redirect = 0;
             while ((token = strtok(NULL, " "))) {
                 isCmd = isCommand(token);
                 if ( isCmd == 1 && !commandSaved) {
@@ -122,6 +131,63 @@ int main(int argc, char *argv[]) {
                     exit(1);
                 } else if ( isFileRedirector(token) ) {
                     // TODO: Add file redirection logic
+                    if ( strcmp(token, ">") == 0 ) {
+                        char* fileName = strtok(NULL, " ");
+                        fd = open(fileName, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+
+                        if ( fd < 0) {
+                            printf("yash: File %s could not be opened\n", fileName); // Remove? Expected error msg?
+                            commandSaved = 0;
+                            break;
+                        }
+
+                        if ( dup2(fd, STDOUT_FILENO) < 0 ) {
+                            printf("Failed to redirect STDOUT\n");
+                            close(fd);
+                            commandSaved = 0;
+                            break;
+                        }
+                        stdout_redirect = 1;
+                        close(fd);
+                    } else if ( strcmp(token, "<") == 0 ) {
+                        char* fileName = strtok(NULL, " ");
+                        fd = open(fileName, O_RDONLY, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+
+                        if ( fd < 0 ) {
+                            if ( errno == ENOENT) {
+                                printf("yash: File %s does not exist\n", fileName); // Remove? Expected error msg?
+                            } else {
+                                printf("yash: File %s could not be opened\n", fileName);
+                            }
+                            commandSaved = 0;
+                            break;
+                        }
+                        if ( dup2(fd, STDIN_FILENO) < 0 ) {
+                            printf("Failed to redirect STDIN\n");
+                            close(fd);
+                            exit(1);
+                        }
+                        stdin_redirect = 1;
+                        close(fd);
+                    } else {
+                        char* fileName = strtok(NULL, " ");
+                        fd = open(fileName, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+
+                        if ( fd < 0) {
+                            printf("yash: File %s could not be opened\n", fileName); // Remove? Expected error msg?
+                            commandSaved = 0;
+                            break;
+                        }
+
+                        if ( dup2(fd, STDERR_FILENO) < 0 ) {
+                            printf("Failed to redirect STDERR\n");
+                            close(fd);
+                            commandSaved = 0;
+                            break;
+                        }
+                        stderr_redirect = 1;
+                        close(fd);
+                    }
                 } else if ( strcmp(token, "|") == 0 ) {
                     // TODO: Add piping logic
                 } else {
@@ -161,6 +227,27 @@ int main(int argc, char *argv[]) {
                         execvp(command, cmdArgs);
                     }
                     wait(NULL);
+                }
+                if ( stdin_redirect ) {
+                    if ( dup2(saved_stdin, STDIN_FILENO) < 0 ) {
+                        printf("Failed to restore stdin\n");
+                        exit(1);
+                    }
+                    close(saved_stdin);
+                }
+                if ( stdout_redirect ) {
+                    if ( dup2(saved_stdout, STDOUT_FILENO) < 0 ) {
+                        printf("Failed to restore stdout\n");
+                        exit(1);
+                    }
+                    close(saved_stdout);
+                }
+                if ( stderr_redirect ) {
+                    if ( dup2(saved_stderr, STDERR_FILENO) < 0 ) {
+                        printf("Failed to restore stderr\n");
+                        exit(1);
+                    }
+                    close(saved_stderr);
                 }
             }
             for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
