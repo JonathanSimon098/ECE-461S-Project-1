@@ -64,6 +64,107 @@ int isFileRedirector( char* tkn ) {
     return 0;
 }
 
+int execute_command(char* command, char** cmdArgs, int stdin_redirect, int stdout_redirect, int stderr_redirect, int saved_stdin, int saved_stdout, int saved_stderr
+    , int active_pipe, int* pipe_pgid, int pipe_detected, int pipe_fds[], int temp_fds_holder[]) {
+    // Determine if shell command
+    if ( strcmp(command, "fg") == 0) {
+
+    }else if (strcmp(command, "bg") == 0 ) {
+
+    }else if (strcmp(command, "jobs") ==0 ) {
+
+    } else {
+        // CREATE FORK AND THEN EXEC
+        const pid_t pid = fork();
+        if ( pid == -1 ) {
+            printf("Error forking\n");
+            return -1;
+        }
+
+        if ( pid == 0 ) {
+            /* CHILD */
+            if ( active_pipe ) {
+                if (setpgid(0, *pipe_pgid) == -1) {
+                    printf("Error setting pgid to child\n");
+                    return -1;
+                }
+            } else {
+                *pipe_pgid = pid;
+                if (setpgid(0, 0) == -1) {
+                    printf("Error setting pgid of child\n");
+                    return -1;
+                }
+            }
+
+            if ( active_pipe ) {
+                // cleanup old pipe and start new
+                if ( dup2(pipe_fds[0], STDIN_FILENO) < 0 ) {
+                    printf("Failed to redirect STDIN\n");
+                    close(pipe_fds[0]);
+                    close(pipe_fds[1]);
+                    return -2;
+                }
+                close(pipe_fds[0]);
+                //close(pipe_fds[1]);
+            }
+            // currently no pipe active, use new one
+            if ( pipe_detected ) {
+                if ( dup2(temp_fds_holder[1], STDOUT_FILENO) < 0 ) {
+                    printf("Failed to redirect STDOUT\n");
+                    close(temp_fds_holder[0]);
+                    close(temp_fds_holder[1]);
+                    return -2;
+                }
+                close(temp_fds_holder[1]);
+            }
+            execvp(command, cmdArgs);
+            //pipe_fds[0] = temp_fds_holder[0];
+        } else {
+            // parent does not need pipe
+            if ( pipe_detected ) {
+                //close(temp_fds_holder[0]);
+                close(temp_fds_holder[1]);
+                pipe_fds[0] = temp_fds_holder[0];
+            } else {
+                // Restores STDs if end of pipe sequence
+                if ( stdin_redirect ) {
+                    if ( dup2(saved_stdin, STDIN_FILENO) < 0 ) {
+                        printf("Failed to restore stdin\n");
+                        return -1;
+                    }
+                    close(saved_stdin);
+                }
+                if ( stdout_redirect ) {
+                    if ( dup2(saved_stdout, STDOUT_FILENO) < 0 ) {
+                        printf("Failed to restore stdout\n");
+                        return -1;
+                    }
+                    close(saved_stdout);
+                }
+                if ( stderr_redirect ) {
+                    if ( dup2(saved_stderr, STDERR_FILENO) < 0 ) {
+                        printf("Failed to restore stderr\n");
+                        return -1;
+                    }
+                    close(saved_stderr);
+                }
+            }
+        }
+        if ( !pipe_detected ) {
+            while (wait(NULL) > 0 || errno != ECHILD); // wait for all children to terminate
+        }
+    }
+
+    return 0;
+}
+
+void cleanup(int cmdArgsIndex, char** cmdArgs, char* usrInputCopy, char* usrInput) {
+    for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
+    free(cmdArgs);
+    free(usrInputCopy);
+    free(usrInput);
+}
+
 int main(int argc, char *argv[]) {
     char* usrInput;
     int commandExecuted = 0;
@@ -116,6 +217,9 @@ int main(int argc, char *argv[]) {
             int stdin_redirect = 0;
             int stdout_redirect = 0;
             int stderr_redirect = 0;
+            int pipe_fds[2];
+            int active_pipe = 0;
+            int pipe_pgid = 0;
             while ((token = strtok(NULL, " "))) {
                 isCmd = isCommand(token);
                 if ( isCmd == 1 && !commandSaved) {
@@ -125,12 +229,9 @@ int main(int argc, char *argv[]) {
                     commandExecuted = 0;
                     commandSaved = 1;
                 } else if (isCmd == -1) { // ERROR occurred
-                    free(usrInputCopy);
-                    free(usrInput);
-                    free(cmdArgs);
+                    cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
                     exit(1);
                 } else if ( isFileRedirector(token) ) {
-                    // TODO: Add file redirection logic
                     if ( strcmp(token, ">") == 0 ) {
                         char* fileName = strtok(NULL, " ");
                         fd = open(fileName, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
@@ -190,16 +291,93 @@ int main(int argc, char *argv[]) {
                     }
                 } else if ( strcmp(token, "|") == 0 ) {
                     // TODO: Add piping logic
+                    int temp_fds_holder[2];
+                    if (pipe(temp_fds_holder) == -1) {
+                        printf("Error creating pipe\n");
+                        exit(1);
+                    }
+
+                    // // Determine if shell command
+                    // if ( strcmp(command, "fg") == 0) {
+                    //
+                    // }else if (strcmp(command, "bg") == 0 ) {
+                    //
+                    // }else if (strcmp(command, "jobs") ==0 ) {
+                    //
+                    // } else {
+                    //     // CREATE FORK AND THEN EXEC
+                    //     const pid_t pid = fork();
+                    //     if ( pid == -1 ) {
+                    //         printf("Error forking\n");
+                    //         cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
+                    //         exit(1);
+                    //     }
+                    //
+                    //     if ( active_pipe ) {
+                    //         if (setpgid(0, pipe_pgid) == -1) {
+                    //             printf("Error setting pgid to child\n");
+                    //             cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
+                    //             exit(1);
+                    //         }
+                    //     } else {
+                    //         pipe_pgid = pid;
+                    //         if (setpgid(0, 0) == -1) {
+                    //             printf("Error setting pgid of child\n");
+                    //             cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
+                    //             exit(1);
+                    //         }
+                    //     }
+                    //
+                    //     if ( pid == 0 ) {
+                    //         /* CHILD */
+                    //         if ( active_pipe ) {
+                    //             // cleanup old pipe and start new
+                    //             if ( dup2(pipe_fds[0], STDIN_FILENO) < 0 ) {
+                    //                 printf("Failed to redirect STDIN\n");
+                    //                 close(pipe_fds[0]);
+                    //                 close(pipe_fds[1]);
+                    //                 commandSaved = 0;
+                    //                 break;
+                    //             }
+                    //             close(pipe_fds[0]);
+                    //             close(pipe_fds[1]);
+                    //         }
+                    //         // currently no pipe active, use new one
+                    //         if ( dup2(temp_fds_holder[1], STDOUT_FILENO) < 0 ) {
+                    //             printf("Failed to redirect STDOUT\n");
+                    //             close(temp_fds_holder[0]);
+                    //             close(temp_fds_holder[1]);
+                    //             commandSaved = 0;
+                    //             break;
+                    //         }
+                    //         close(temp_fds_holder[1]);
+                    //         execvp(command, cmdArgs);
+                    //     } else {
+                    //         // parent does not need pipe
+                    //         //close(temp_fds_holder[0]);
+                    //         close(temp_fds_holder[1]);
+                    //     }
+                    //     // wait(NULL);
+                    // }
+                    // pipe_fds[0] = temp_fds_holder[0];
+                    int exec_status = execute_command(command, cmdArgs, stdin_redirect, stdout_redirect, stderr_redirect,
+                        saved_stdin, saved_stdout, saved_stderr, active_pipe, &pipe_pgid, 1, pipe_fds, temp_fds_holder);
+                    if (exec_status == -1) {
+                        cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
+                        exit(1);
+                    }
+                    if (exec_status == -2) break;
+                    commandSaved = 0;
+                    for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
+                    cmdArgsIndex = 0;
+                    active_pipe = 1;
                 } else {
                     cmdArgsIndex++;
                     if (cmdArgsIndex > (cmdArgsCount - 1)) { // -1 for NULL
                         cmdArgsCount+=5;
                         char** temp = realloc(cmdArgs, sizeof(char*) * (cmdArgsCount)); // WARNING: Allocated memory is leaked
                         if (temp == NULL) {
-                            for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
-                            free(cmdArgs);
-                            free(usrInputCopy);
-                            free(usrInput);
+                            cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
                             exit(1);
                         }
                         cmdArgs = temp;
@@ -211,43 +389,11 @@ int main(int argc, char *argv[]) {
             }
             cmdArgs[cmdArgsIndex] = NULL;
             if (!commandExecuted && commandSaved) {
-                // Determine if shell command
-                if ( strcmp(command, "fg") == 0) {
-
-                }else if (strcmp(command, "bg") == 0 ) {
-
-                }else if (strcmp(command, "jobs") ==0 ) {
-
-                } else {
-                    // CREATE FORK AND THEN EXEC
-                    const pid_t pid = fork();
-
-                    if ( pid == 0 ) {
-                        /* CHILD */
-                        execvp(command, cmdArgs);
-                    }
-                    wait(NULL);
-                }
-                if ( stdin_redirect ) {
-                    if ( dup2(saved_stdin, STDIN_FILENO) < 0 ) {
-                        printf("Failed to restore stdin\n");
-                        exit(1);
-                    }
-                    close(saved_stdin);
-                }
-                if ( stdout_redirect ) {
-                    if ( dup2(saved_stdout, STDOUT_FILENO) < 0 ) {
-                        printf("Failed to restore stdout\n");
-                        exit(1);
-                    }
-                    close(saved_stdout);
-                }
-                if ( stderr_redirect ) {
-                    if ( dup2(saved_stderr, STDERR_FILENO) < 0 ) {
-                        printf("Failed to restore stderr\n");
-                        exit(1);
-                    }
-                    close(saved_stderr);
+                int exec_status = execute_command(command, cmdArgs, stdin_redirect, stdout_redirect, stderr_redirect,
+                        saved_stdin, saved_stdout, saved_stderr, active_pipe, &pipe_pgid, 0, pipe_fds, NULL);
+                if (exec_status == -1) {
+                    cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
+                    exit(1);
                 }
             }
             for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
