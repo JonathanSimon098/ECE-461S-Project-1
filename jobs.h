@@ -33,8 +33,8 @@ int insert_job(Node** head, pid_t pid, pid_t pgid, char* command, JobState state
 // Sets the job status of job liked to pid
 void update_job_status(Node* head, pid_t pid, JobState state);
 
-// Prints all the elements of the list from most recent to oldest (recursion)
-int print_jobs(Node** head, const Node* current, int most_recent_job);
+// Prints all the elements of the list from most recent to oldest
+int print_jobs(Node** head);
 
 // Frees memory and reassign pointers
 void delete_job(Node** head, Node* job_to_delete, Node* prev_job);

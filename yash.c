@@ -147,7 +147,8 @@ int execute_command(char* usrInput, char* command, char** cmdArgs, int stdin_red
         }
 
     }else if (strcmp(command, "jobs") ==0 ) {
-        print_jobs(&jobs_head, jobs_head, 1);
+        int print_status = print_jobs(&jobs_head);
+        if (print_status == -1) return -1;
     } else {
         // CREATE FORK AND THEN EXEC
         const pid_t pid = fork();

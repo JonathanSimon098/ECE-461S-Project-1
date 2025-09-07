@@ -45,40 +45,54 @@ void update_job_status(Node* head, pid_t pid, JobState state) {
 }
 
 // Initial call to print_jobs needs to make most_recent_job equal to 1
-int print_jobs(Node** head, const Node* current, int most_recent_job) {
-    if ( current == NULL ) return most_recent_job;
+int print_jobs(Node** head) {
 
-    int is_recent_job = most_recent_job;
-    if ( is_recent_job) {
-        // First encounter of 'Stopped' guarantees it is at least the most recent
-        is_recent_job = 0;
+    char** job_outputs = (char**) malloc(sizeof(char*) * 20); // Max jobs is 20
+    if (job_outputs== NULL) {
+        perror("print_jobs");
+        return -1;
     }
+    int job_output_size = 0;
 
-    int another_recent_job = print_jobs(head, current->next, is_recent_job);
-
+    Node* current = *head;
+    Node* nextNode;
     char recent_job = '+';
-    if ( !most_recent_job && another_recent_job == 0 ) {
-        // If the current job is 'Done' then it is not most recent
+
+    while ( current != NULL) {
+        if (job_output_size > 19) break;
+        nextNode = current->next;
+
+        char* state = "";
+        switch ( current->state ) {
+            case STOPPED:
+                state = "Stopped";
+                break;
+            case RUNNING:
+                state = "Running";
+                break;
+            case DONE:
+                state = "Done";
+                break;
+        }
+
+        const size_t buffer_size = strlen(state) + 17 + strlen(current->command); // null terminator included
+        char* job_out = (char*)malloc(buffer_size);
+        snprintf(job_out, buffer_size, "[%d]%c %s          %s\n", current->jobid, recent_job, state, current->command);
+        job_outputs[job_output_size++] = job_out;
+        if (current->state == DONE) {
+            terminate_job(head, current->jobid);
+        }
         recent_job = '-';
+        current = nextNode;
     }
 
-    char* state = "";
-    switch ( current->state ) {
-        case STOPPED:
-            state = "Stopped";
-            break;
-        case RUNNING:
-            state = "Running";
-            break;
-        case DONE:
-            state = "Done";
-            break;
+    for (int i = job_output_size - 1; i >= 0; i--) {
+        printf("%s", job_outputs[i]);
+        free(job_outputs[i]);
     }
-    printf("[%d]%c %s          %s\n", current->jobid, recent_job, state, current->command);
-    if (current->state == DONE) {
-        terminate_job(head, current->jobid);
-    }
-    return most_recent_job;
+
+    free(job_outputs);
+    return 0;
 }
 
 void delete_job(Node** head, Node* job_to_delete, Node* prev_job) {
