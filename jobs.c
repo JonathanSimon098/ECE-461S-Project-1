@@ -140,10 +140,10 @@ void free_jobs(Job **head) {
     *head = NULL;
 }
 
-Job* find_recent_job(Job* head) {
+Job* find_recent_job(Job* head, const int fg) {
     Job* current = head;
     while ( current != NULL ) {
-        if ( current->state == STOPPED || current->state == RUNNING) {
+        if ( current->state == STOPPED || (current->state == RUNNING && fg)) {
             return current;
         }
         current = current->next;

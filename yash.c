@@ -248,6 +248,7 @@ Job* parse_line(char* usrInput) {
                         cleanup(head, usrInputCopy);
                         return NULL;
                     }
+                    command->argv = temp;
                     cmdArgs = temp;
                 }
                 char* arg_copy = strdup(token);
@@ -267,7 +268,7 @@ void launch_job(Job* job) {
     char* command = job->commands->argv[0];
     pid_t pgid = job->pgid;
     if ( strcmp(command, "fg") == 0) {
-        Job* job_to_fg = find_recent_job(job_head);
+        Job* job_to_fg = find_recent_job(job_head, 1);
         if (job_to_fg == NULL) {
             // fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
             return;
@@ -328,7 +329,7 @@ void launch_job(Job* job) {
         return;
 
     }else if (strcmp(command, "bg") == 0 ) {
-        Job* job_to_bg = find_recent_job(job_head);
+        Job* job_to_bg = find_recent_job(job_head, 0);
         if (job_to_bg == NULL) {
             printf("yash: bg: current: no such job\n");
             return;
@@ -350,6 +351,7 @@ void launch_job(Job* job) {
     }
 
     pid_t pid;
+    pid_t last_pid = 0;
     int pipe_fds[2];
     int infile = STDIN_FILENO; // Input for next command
     int outfile = STDOUT_FILENO; // Output for current command
@@ -369,6 +371,7 @@ void launch_job(Job* job) {
         }
 
         pid = fork(); // spawn the child :)
+        last_pid = pid;
 
         if (pid < 0) {
             perror("fork");
@@ -518,7 +521,7 @@ void launch_job(Job* job) {
 
         // Wait for child to terminate
         int status;
-        if (waitpid(job->pgid, &status, WUNTRACED) == -1) {
+        if (waitpid(last_pid, &status, WUNTRACED) == -1) { // are you suggesting changing this?
             fprintf(stderr, "yash: %s: %s\n", command,strerror(errno));
             return;
         }
