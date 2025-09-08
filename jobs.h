@@ -55,6 +55,6 @@ void terminate_job(Job** head, int jobid);
 void free_jobs(Job** head);
 
 // Finds the job with the highest ID that is stopped
-Job* find_recent_job(Job* head);
+Job* find_recent_job(Job* head, int fg);
 
 #endif //ECE_461S_PROJECT_1_PIDS_H
