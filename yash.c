@@ -19,7 +19,7 @@
 #include <unistd.h>
 #include "jobs.h"
 
-Node* jobs_head = NULL;
+Job* job_head = NULL;
 volatile pid_t g_foreground_pgid = 0; // Tracks the current foreground job's PGID
 
 int isCommand( char* tkn ) {
@@ -69,235 +69,20 @@ int isFileRedirector( char* tkn ) {
     return 0;
 }
 
-int execute_command(char* usrInput, char* command, char** cmdArgs, int stdin_redirect, int stdout_redirect, int stderr_redirect, int saved_stdin, int saved_stdout, int saved_stderr
-    , int active_pipe, pid_t* pipe_pgid, int pipe_detected, int pipe_fds[], int temp_fds_holder[], int send_to_bg, JobState state) {
-    // Determine if shell command
-    if ( strcmp(command, "fg") == 0) {
-        Node* job_to_fg = find_last_stopped_job(jobs_head);
-        if (job_to_fg == NULL) {
-            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-            return -2;
-        }
+void cleanup(Command* head, char* usrInputCopy) {
+    Command* current = head;
+    Command* nextNode;
 
-        printf("%s\n", job_to_fg->command);
-        update_job_status(jobs_head, job_to_fg->pid, RUNNING);
-
-        // Send continue signal
-        if (kill(-(job_to_fg->pgid), SIGCONT) < 0) {
-            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-            return -1;
-        }
-
-        // Setup signal actions
-        struct sigaction sa_ign, sa_dfl;
-        sa_ign.sa_handler = SIG_IGN;
-        sigemptyset(&sa_ign.sa_mask);
-        sa_ign.sa_flags = 0;
-        sa_dfl.sa_handler = SIG_DFL;
-        sigemptyset(&sa_dfl.sa_mask);
-        sa_dfl.sa_flags = 0;
-
-        // Ignore terminal signals
-        sigaction(SIGTTIN, &sa_ign, NULL);
-        sigaction(SIGTTOU, &sa_ign, NULL);
-
-        // Give terminal control to the job
-        if (tcsetpgrp(STDIN_FILENO, job_to_fg->pgid) == -1) {
-            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-            return -1;
-        }
-
-        // Wait for it to stop or terminate
-        int status;
-        if (waitpid(-(job_to_fg->pid), &status, WUNTRACED) == -1) {
-            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-            return -1;
-        }
-
-        // Take terminal control back
-        if (tcsetpgrp(STDIN_FILENO, getpgrp()) == -1) {
-            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-            return -1;
-        }
-
-        // Restore terminal signals
-        sigaction(SIGTTIN, &sa_dfl, NULL);
-        sigaction(SIGTTOU, &sa_dfl, NULL);
-
-        // Handle the result
-        if (WIFSTOPPED(status)) {
-            update_job_status(jobs_head, job_to_fg->pid, STOPPED);
-        } else {
-            terminate_job(&jobs_head, job_to_fg->jobid);
-        }
-
-    }else if (strcmp(command, "bg") == 0 ) {
-        Node* job_to_bg = find_last_stopped_job(jobs_head);
-        if (job_to_bg == NULL) {
-            printf("yash: bg: current: no such job\n");
-            return -2;
-        }
-
-        update_job_status(jobs_head, job_to_bg->pid, RUNNING);
-        printf("[%d]+ %s &\n", job_to_bg->jobid, job_to_bg->command);
-
-        if (kill(-(job_to_bg->pid), SIGCONT) < 0) {
-            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-            return -1;
-        }
-
-    }else if (strcmp(command, "jobs") ==0 ) {
-        int print_status = print_jobs(&jobs_head);
-        if (print_status == -1) return -1;
-    } else {
-        // CREATE FORK AND THEN EXEC
-        const pid_t pid = fork();
-        if ( pid == -1 ) {
-            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-            return -1;
-        }
-
-        if ( pid == 0 ) {
-            /* CHILD */
-
-            pid_t pgid_to_set = (*pipe_pgid == 0) ? getpid() : *pipe_pgid;
-            if (setpgid(0, pgid_to_set) == -1) {
-                fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-                return -1;
-            }
-
-            if ( active_pipe ) {
-                // cleanup old pipe and start new
-                if ( dup2(pipe_fds[0], STDIN_FILENO) < 0 ) {
-                    fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-                    close(pipe_fds[0]);
-                    close(pipe_fds[1]);
-                    return -2;
-                }
-                close(pipe_fds[0]);
-                //close(pipe_fds[1]);
-            }
-            // currently no pipe active, use new one
-            if ( pipe_detected ) {
-                if ( dup2(temp_fds_holder[1], STDOUT_FILENO) < 0 ) {
-                    fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-                    close(temp_fds_holder[0]);
-                    close(temp_fds_holder[1]);
-                    return -2;
-                }
-                close(temp_fds_holder[1]);
-            }
-            // Reset signals for child
-            signal(SIGINT, SIG_DFL);
-            signal(SIGTSTP, SIG_DFL);
-            signal(SIGTTIN, SIG_DFL);
-            signal(SIGTTOU, SIG_DFL);
-            signal(SIGCHLD, SIG_DFL);
-            execvp(command, cmdArgs);
-            //pipe_fds[0] = temp_fds_holder[0];
-        } else {
-            /* PARENT */
-            // parent does not need pipe
-            if (*pipe_pgid == 0) {
-                *pipe_pgid = pid;
-            }
-
-            if (setpgid(pid, *pipe_pgid) == -1) {
-                fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-                return -1;
-            }
-
-            if ( pipe_detected ) {
-                //close(temp_fds_holder[0]);
-                close(temp_fds_holder[1]);
-                pipe_fds[0] = temp_fds_holder[0];
-            } else {
-                // Restores STDs if end of pipe sequence
-                if ( stdin_redirect ) {
-                    if ( dup2(saved_stdin, STDIN_FILENO) < 0 ) {
-                        fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
-                        return -1;
-                    }
-                    close(saved_stdin);
-                }
-                if ( stdout_redirect ) {
-                    if ( dup2(saved_stdout, STDOUT_FILENO) < 0 ) {
-                        fprintf(stderr, "yash: %s: %s\n", command,strerror(errno));
-                        return -1;
-                    }
-                    close(saved_stdout);
-                }
-                if ( stderr_redirect ) {
-                    if ( dup2(saved_stderr, STDERR_FILENO) < 0 ) {
-                        fprintf(stderr, "yash: %s: %s\n", command,strerror(errno));
-                        return -1;
-                    }
-                    close(saved_stderr);
-                }
-            }
-        }
-        struct sigaction sa_ign, sa_dfl;
-
-        // Setup for ignoring signals
-        sa_ign.sa_handler = SIG_IGN;
-        sigemptyset(&sa_ign.sa_mask);
-        sa_ign.sa_flags = 0;
-
-        // Setup for restoring default signal handlers
-        sa_dfl.sa_handler = SIG_DFL;
-        sigemptyset(&sa_dfl.sa_mask);
-        sa_dfl.sa_flags = 0;
-
-        // Temporarily ignore terminal stop signals
-        sigaction(SIGTTIN, &sa_ign, NULL);
-        sigaction(SIGTTOU, &sa_ign, NULL);
-
-        int jobid = insert_job(&jobs_head, pid, *pipe_pgid, usrInput, state);
-        if (send_to_bg) {
-            // printf("[%d]+ %s\n", jobid, usrInput);
-        } else {
-            g_foreground_pgid = *pipe_pgid;
-            // Gives terminal control to child
-            if (tcsetpgrp(STDIN_FILENO, *pipe_pgid) == -1) {
-                fprintf(stderr, "yash: %s: %s\n", command,strerror(errno));
-                return -1;
-            }
-
-            // Wait for child to terminate
-            int status;
-            if (waitpid(pid, &status, WUNTRACED) == -1) {
-                fprintf(stderr, "yash: %s: %s\n", command,strerror(errno));
-                return -1;
-            }
-
-            // Child changed state, terminal control regained by shell
-            if (tcsetpgrp(STDIN_FILENO, getpgrp()) == -1) {
-                fprintf(stderr, "yash: %s: %s\n", command,strerror(errno));
-                return -1;
-            }
-
-            g_foreground_pgid = 0;
-            // Restore the default handlers for the terminal stop signals.
-            sigaction(SIGTTIN, &sa_dfl, NULL);
-            sigaction(SIGTTOU, &sa_dfl, NULL);
-
-            // Child finished normally, remove from job list
-            if (WIFSTOPPED(status)) {
-                update_job_status(jobs_head, pid, STOPPED);
-            }else {
-                terminate_job(&jobs_head, jobid);
-            }
-        }
+    while ( current != NULL ) {
+        nextNode = current->next;
+        for (int i = 0; i < current->argCount; i++) free(current->argv[i]);
+        free(current->argv);
+        if (current->inputFile) free(current->inputFile);
+        if (current->outputFile) free(current->outputFile);
+        if (current->errorFile) free(current->errorFile);
+        current = nextNode;
     }
-
-    return 0;
-}
-
-void cleanup(int cmdArgsIndex, char** cmdArgs, char* usrInputCopy, char* usrInput) {
-    for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
-    free(cmdArgs);
     free(usrInputCopy);
-    free(usrInput);
 }
 
 void handle_sigtstp(int sig) {
@@ -328,11 +113,432 @@ void handle_sigchld(int sig) {
 
     while ( (pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0 ) {
         if (WIFSTOPPED(status)) {
-            update_job_status(jobs_head, pid, STOPPED);
+            update_job_status(job_head, pid, STOPPED);
         } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
-            update_job_status(jobs_head, pid, DONE);
+            update_job_status(job_head, pid, DONE);
         } else if (WIFCONTINUED(status)) {
-            update_job_status(jobs_head, pid, RUNNING);
+            update_job_status(job_head, pid, RUNNING);
+        }
+    }
+
+}
+
+Job* parse_line(char* usrInput) {
+    char* usrInputCopy = strdup(usrInput);
+    if (usrInputCopy == NULL) {
+        fprintf(stderr, "yash: %s\n", strerror(errno));
+        return NULL;
+    } // failed to allocate. exit.
+    char** cmdArgs = calloc(10, sizeof(char*));
+    if (cmdArgs == NULL) {
+        fprintf(stderr, "yash: %s\n", strerror(errno));
+        free(usrInputCopy);
+        return NULL;
+    } // failed to allocate. exit.
+
+    char* saved_token_ptr;
+    char* token = strtok_r(usrInputCopy, " ", &saved_token_ptr);
+
+    Command* head = NULL;
+    Job* job = NULL;
+    if (token != NULL) {
+        job = (Job*)malloc(sizeof(Job));
+        //int job_insert = insert_job(&job, )
+        if (job == NULL) {
+            fprintf(stderr, "yash: %s\n", strerror(errno));
+            free(usrInputCopy);
+            free(cmdArgs);
+            return NULL;
+        } // failed to allocate. exit.
+
+        Command* command = (Command*)malloc(sizeof(Command));
+        if (command == NULL) {
+            fprintf(stderr, "yash: %s\n", strerror(errno));
+            free(usrInputCopy);
+            free(cmdArgs);
+            free(job);
+            return NULL;
+        } // failed to allocate. exit.
+        head = command;
+        command->argv = cmdArgs;
+        command->argCount = 0;
+        command->argSize = 10;
+        command->inputFile = NULL;
+        command->outputFile = NULL;
+        command->errorFile = NULL;
+        command->next = NULL;
+        job->commands = command;
+        job->full_command_line = strdup(usrInput);
+        job->pgid = 0;
+        job->is_background = 0;
+        job->state = RUNNING;
+        job->next = NULL;
+
+        int commandSaved = 0;
+        int isCmd = isCommand(token);
+        if ( isCmd == 1 ) {
+            cmdArgs[(command->argCount)++] = strdup(token);
+            commandSaved = 1;
+        } else {
+            free(command);
+            free(cmdArgs);
+            free(usrInputCopy);
+            free(job);
+            return NULL;
+        }
+
+        while ((token = strtok_r(NULL, " ", &saved_token_ptr))) {
+            isCmd = isCommand(token);
+            if ( isCmd == 1 && !commandSaved) {
+                cmdArgs[(command->argCount)++] = strdup(token);
+                commandSaved = 1;
+            } else if (isCmd == -1) { // ERROR occurred
+                cleanup(head, usrInputCopy);
+                return NULL;
+            } else if ( isFileRedirector(token) ) {
+                if ( strcmp(token, ">") == 0 ) {
+                    char* fileName = strtok_r(NULL, " ", &saved_token_ptr);
+                    command->outputFile = strdup(fileName);
+                } else if ( strcmp(token, "<") == 0 ) {
+                    char* fileName = strtok_r(NULL, " ", &saved_token_ptr);
+                    command->inputFile = strdup(fileName);
+                } else {
+                    char* fileName = strtok_r(NULL, " ", &saved_token_ptr);
+                    command->errorFile = strdup(fileName);
+                }
+            } else if ( strcmp(token, "|") == 0 ) {
+                command->argv[command->argCount] = NULL;
+
+                Command* nextCommand = (Command*)malloc(sizeof(Command));
+                if (nextCommand == NULL) {
+                    cleanup(command, usrInputCopy);
+                    free(job);
+                    return NULL;
+                }
+                command->next = nextCommand;
+                command = nextCommand;
+
+                char** newCmdArgs = calloc(10, sizeof(char*));
+                if (newCmdArgs == NULL) {
+                    fprintf(stderr, "yash: %s\n", strerror(errno));
+                    free(nextCommand);
+                    cleanup(command, usrInputCopy);
+                    free(job);
+                    return NULL;
+                } // failed to allocate. exit.
+
+                command->argv = newCmdArgs;
+                command->argCount = 0;
+                command->argSize = 10;
+                command->inputFile = NULL;
+                command->outputFile = NULL;
+                command->errorFile = NULL;
+                command->next = NULL;
+
+                cmdArgs = newCmdArgs;
+                commandSaved = 0;
+            } else if ( strcmp(token, "&") == 0 ) {
+                job->is_background = 1;
+            } else {
+                (command->argCount)++;
+                if ((command->argCount) > ((command->argSize) - 1)) { // -1 for NULL
+                    (command->argSize)+=5;
+                    char** temp = realloc(cmdArgs, sizeof(char*) * ((command->argSize))); // WARNING: Allocated memory is leaked
+                    if (temp == NULL) {
+                        cleanup(head, usrInputCopy);
+                        return NULL;
+                    }
+                    cmdArgs = temp;
+                }
+                char* arg_copy = strdup(token);
+                cmdArgs[(command->argCount) - 1] = arg_copy;
+            }
+        }
+        cmdArgs[(command->argCount)] = NULL;
+    } else {
+        free(cmdArgs);
+    }
+    free(usrInputCopy);
+    return job;
+}
+
+void launch_job(Job* job) {
+    // Determine if shell command
+    char* command = job->commands->argv[0];
+    pid_t pgid = job->pgid;
+    if ( strcmp(command, "fg") == 0) {
+        Job* job_to_fg = find_recent_job(job_head);
+        if (job_to_fg == NULL) {
+            // fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
+            return;
+        }
+
+        pid_t target_pgid = job_to_fg->pgid;
+        printf("%s\n", job_to_fg->full_command_line);
+        update_job_status(job_head, pgid, RUNNING);
+
+        // Send continue signal
+        if (kill(-(target_pgid), SIGCONT) < 0) {
+            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
+            return;
+        }
+
+        // Setup signal actions
+        struct sigaction sa_ign, sa_dfl;
+        sa_ign.sa_handler = SIG_IGN;
+        sigemptyset(&sa_ign.sa_mask);
+        sa_ign.sa_flags = 0;
+        sa_dfl.sa_handler = SIG_DFL;
+        sigemptyset(&sa_dfl.sa_mask);
+        sa_dfl.sa_flags = 0;
+
+        // Ignore terminal signals
+        sigaction(SIGTTIN, &sa_ign, NULL);
+        sigaction(SIGTTOU, &sa_ign, NULL);
+
+        // Give terminal control to the job
+        if (tcsetpgrp(STDIN_FILENO, target_pgid) == -1) {
+            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
+            return;
+        }
+
+        // Wait for it to stop or terminate
+        int status;
+        if (waitpid(-(target_pgid), &status, WUNTRACED) == -1) {
+            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
+            return;
+        }
+
+        // Take terminal control back
+        if (tcsetpgrp(STDIN_FILENO, getpgrp()) == -1) {
+            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
+            return;
+        }
+
+        // Restore terminal signals
+        sigaction(SIGTTIN, &sa_dfl, NULL);
+        sigaction(SIGTTOU, &sa_dfl, NULL);
+
+        // Handle the result
+        if (WIFSTOPPED(status)) {
+            update_job_status(job_head, target_pgid, STOPPED);
+        } else {
+            terminate_job(&job_head, job_to_fg->jobid);
+        }
+        return;
+
+    }else if (strcmp(command, "bg") == 0 ) {
+        Job* job_to_bg = find_recent_job(job_head);
+        if (job_to_bg == NULL) {
+            printf("yash: bg: current: no such job\n");
+            return;
+        }
+
+        pid_t target_pgid = job_to_bg->pgid;
+        update_job_status(job_head, target_pgid, RUNNING);
+        printf("[%d]+ %s &\n", job_to_bg->jobid, job_to_bg->full_command_line);
+
+        if (kill(-(target_pgid), SIGCONT) < 0) {
+            fprintf(stderr, "yash: %s: %s\n", command, strerror(errno));
+            return;
+        }
+        return;
+
+    }else if (strcmp(command, "jobs") ==0 ) {
+        print_jobs(&job_head);
+        return;
+    }
+
+    pid_t pid;
+    int pipe_fds[2];
+    int infile = STDIN_FILENO; // Input for next command
+    int outfile = STDOUT_FILENO; // Output for current command
+
+    Command* cmd = job->commands;
+    if (cmd == NULL) return;
+
+    while (cmd != NULL) {
+        if (cmd->next) { // more than one command present in job
+            if (pipe(pipe_fds) < 0) {
+                perror("pipe");
+                return;
+            }
+            outfile = pipe_fds[1];
+        } else {
+            outfile = STDOUT_FILENO;
+        }
+
+        pid = fork(); // spawn the child :)
+
+        if (pid < 0) {
+            perror("fork");
+            return;
+        }
+
+        if (pid == 0) {
+            /* ------CHILD------ */
+
+            // Reset signal handlers to default behavior for children
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTSTP, SIG_DFL);
+            signal(SIGTTIN, SIG_DFL);
+            signal(SIGTTOU, SIG_DFL);
+            signal(SIGCHLD, SIG_DFL);
+
+            // Set the PGID
+            if (job->pgid == 0) {
+                job->pgid = getpid();
+            }
+            setpgid(0, job->pgid);
+
+            // Redirect STDIN
+            if (infile != STDIN_FILENO) {
+                dup2(infile, STDIN_FILENO);
+                close(infile);
+            }
+
+            if (outfile != STDOUT_FILENO) {
+                dup2(outfile, STDOUT_FILENO);
+                close(outfile);
+            }
+
+            // Handle file redirections specified by <, >, 2>
+            char* inputFileName = cmd->inputFile;
+            if (inputFileName) {
+                int fd = open(inputFileName, O_RDONLY, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+
+                if ( fd < 0 ) {
+                    if ( errno == ENOENT) {
+                        fprintf(stderr, "yash: %s: %s\n", inputFileName, strerror(errno));
+                    } else {
+                        fprintf(stderr, "yash: %s: %s\n", inputFileName, strerror(errno));
+                    }
+                    // commandSaved = 0;
+                    break;
+                }
+                if ( dup2(fd, STDIN_FILENO) < 0 ) {
+                    fprintf(stderr, "yash: %s: %s\n", inputFileName, strerror(errno));
+                    close(fd);
+                    exit(1);
+                }
+                // stdin_redirect = 1;
+                close(fd);
+            }
+
+            char* outputFileName = cmd->outputFile;
+            if (outputFileName) {
+                int fd = open(outputFileName, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+
+                if ( fd < 0) {
+                    fprintf(stderr, "yash: %s: %s\n", outputFileName, strerror(errno));
+                    // commandSaved = 0;
+                    break;
+                }
+
+                if ( dup2(fd, STDOUT_FILENO) < 0 ) {
+                    fprintf(stderr, "yash: %s: %s\n", outputFileName, strerror(errno));
+                    close(fd);
+                    // commandSaved = 0;
+                    break;
+                }
+                // stdout_redirect = 1;
+                close(fd);
+            }
+
+            char* errorFileName = cmd->errorFile;
+            if (errorFileName) {
+                int fd = open(errorFileName, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+
+                if ( fd < 0) {
+                    fprintf(stderr, "yash: %s: %s\n", errorFileName, strerror(errno));
+                    // commandSaved = 0;
+                    break;
+                }
+
+                if ( dup2(fd, STDERR_FILENO) < 0 ) {
+                    fprintf(stderr, "yash: %s: %s\n", errorFileName, strerror(errno));
+                    close(fd);
+                    // commandSaved = 0;
+                    break;
+                }
+                // stderr_redirect = 1;
+                close(fd);
+            }
+
+            // Execute command
+            execvp(cmd->argv[0], cmd->argv);
+            perror("execvp");
+            exit(1);
+        }
+
+        /* ------PARENT------ */
+        if (job->pgid == 0) {
+            job->pgid = pid;
+        }
+
+        // Clean up file descriptors
+        if (infile != STDIN_FILENO) {
+            close(infile);
+        }
+
+        if (outfile != STDOUT_FILENO) {
+            close(outfile);
+        }
+
+        // Input for next command
+        infile = pipe_fds[0];
+
+        cmd = cmd->next;
+    }
+
+    insert_job(&job_head, job);
+    if (!(job->is_background)) {
+        struct sigaction sa_ign, sa_dfl;
+
+        // Setup for ignoring signals
+        sa_ign.sa_handler = SIG_IGN;
+        sigemptyset(&sa_ign.sa_mask);
+        sa_ign.sa_flags = 0;
+
+        // Setup for restoring default signal handlers
+        sa_dfl.sa_handler = SIG_DFL;
+        sigemptyset(&sa_dfl.sa_mask);
+        sa_dfl.sa_flags = 0;
+
+        // Temporarily ignore terminal stop signals
+        sigaction(SIGTTIN, &sa_ign, NULL);
+        sigaction(SIGTTOU, &sa_ign, NULL);
+
+        g_foreground_pgid = job->pgid;
+        // Gives terminal control to child
+        if (tcsetpgrp(STDIN_FILENO, job->pgid) == -1) {
+            fprintf(stderr, "yash: %s: %s\n", command,strerror(errno));
+            return;
+        }
+
+        // Wait for child to terminate
+        int status;
+        if (waitpid(job->pgid, &status, WUNTRACED) == -1) {
+            fprintf(stderr, "yash: %s: %s\n", command,strerror(errno));
+            return;
+        }
+
+        // Child changed state, terminal control regained by shell
+        if (tcsetpgrp(STDIN_FILENO, getpgrp()) == -1) {
+            fprintf(stderr, "yash: %s: %s\n", command,strerror(errno));
+            return;
+        }
+
+        g_foreground_pgid = 0;
+        // Restore the default handlers for the terminal stop signals.
+        sigaction(SIGTTIN, &sa_dfl, NULL);
+        sigaction(SIGTTOU, &sa_dfl, NULL);
+
+        // Child finished normally, remove from job list
+        if (WIFSTOPPED(status)) {
+            update_job_status(job_head, job->pgid, STOPPED);
+        }else {
+            terminate_job(&job_head, job->jobid);
         }
     }
 
@@ -383,11 +589,6 @@ int main(int argc, char *argv[]) {
     }
 
     char* usrInput;
-    int commandExecuted = 0;
-    char** cmdArgs = calloc(10, sizeof(char*));
-    if (cmdArgs == NULL) exit(1); // failed to allocate. exit.
-
-    int cmdArgsCount = 10;
 
     while ((usrInput = readline("# "))) { // if user enters ^D
         if (usrInput[0] == '\0') {
@@ -395,177 +596,14 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        char* usrInputCopy = strdup(usrInput);
-        if (usrInputCopy == NULL) {
-            fprintf(stderr, "yash: %s\n", strerror(errno));
-            free(usrInput);
-            free(cmdArgs);
-            return 1;
+        Job* job = parse_line(usrInput);
+
+        if (job) {
+            launch_job(job);
         }
 
-        char* saved_token_ptr;
-        char* token = strtok_r(usrInputCopy, " ", &saved_token_ptr);
-        char* command = strdup(token);
-        if (token != NULL && command != NULL) {
-            int cmdArgsIndex = 0;
-            int commandSaved = 0;
-            int isCmd = isCommand(token);
-            if ( isCmd == 1 ) {
-                cmdArgs[cmdArgsIndex++] = command;
-                commandExecuted = 0;
-                commandSaved = 1;
-            } else if (isCmd == -1) {
-                free(command);
-                free(cmdArgs);
-                free(usrInputCopy);
-                free(usrInput);
-                exit(1);
-            } else {
-                free(command);
-                free(usrInputCopy);
-                free(usrInput);
-                continue;
-            }
-
-            int saved_stdin = dup(STDIN_FILENO);
-            int saved_stdout = dup(STDOUT_FILENO);
-            int saved_stderr = dup(STDERR_FILENO);
-            int fd;
-            int stdin_redirect = 0;
-            int stdout_redirect = 0;
-            int stderr_redirect = 0;
-            int pipe_fds[2];
-            int active_pipe = 0;
-            pid_t pipe_pgid = 0;
-            while ((token = strtok_r(NULL, " ", &saved_token_ptr))) {
-                isCmd = isCommand(token);
-                if ( isCmd == 1 && !commandSaved) {
-                    command = strdup(token);
-                    if (command == NULL) exit(1);
-                    cmdArgs[cmdArgsIndex++] = command;
-                    commandExecuted = 0;
-                    commandSaved = 1;
-                } else if (isCmd == -1) { // ERROR occurred
-                    cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
-                    exit(1);
-                } else if ( isFileRedirector(token) ) {
-                    if ( strcmp(token, ">") == 0 ) {
-                        char* fileName = strtok_r(NULL, " ", &saved_token_ptr);
-                        fd = open(fileName, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
-
-                        if ( fd < 0) {
-                            fprintf(stderr, "yash: %s: %s\n", fileName, strerror(errno));
-                            commandSaved = 0;
-                            break;
-                        }
-
-                        if ( dup2(fd, STDOUT_FILENO) < 0 ) {
-                            fprintf(stderr, "yash: %s: %s\n", fileName, strerror(errno));
-                            close(fd);
-                            commandSaved = 0;
-                            break;
-                        }
-                        stdout_redirect = 1;
-                        close(fd);
-                    } else if ( strcmp(token, "<") == 0 ) {
-                        char* fileName = strtok_r(NULL, " ", &saved_token_ptr);
-                        fd = open(fileName, O_RDONLY, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
-
-                        if ( fd < 0 ) {
-                            if ( errno == ENOENT) {
-                                fprintf(stderr, "yash: %s: %s\n", fileName, strerror(errno));
-                            } else {
-                                fprintf(stderr, "yash: %s: %s\n", fileName, strerror(errno));
-                            }
-                            commandSaved = 0;
-                            break;
-                        }
-                        if ( dup2(fd, STDIN_FILENO) < 0 ) {
-                            fprintf(stderr, "yash: %s: %s\n", fileName, strerror(errno));
-                            close(fd);
-                            exit(1);
-                        }
-                        stdin_redirect = 1;
-                        close(fd);
-                    } else {
-                        char* fileName = strtok_r(NULL, " ", &saved_token_ptr);
-                        fd = open(fileName, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
-
-                        if ( fd < 0) {
-                            fprintf(stderr, "yash: %s: %s\n", fileName, strerror(errno));
-                            commandSaved = 0;
-                            break;
-                        }
-
-                        if ( dup2(fd, STDERR_FILENO) < 0 ) {
-                            fprintf(stderr, "yash: %s: %s\n", fileName, strerror(errno));
-                            close(fd);
-                            commandSaved = 0;
-                            break;
-                        }
-                        stderr_redirect = 1;
-                        close(fd);
-                    }
-                } else if ( strcmp(token, "|") == 0 ) {
-                    int temp_fds_holder[2];
-                    if (pipe(temp_fds_holder) == -1) {
-                        fprintf(stderr, "yash: %s\n", strerror(errno));
-                        exit(1);
-                    }
-
-                    int exec_status = execute_command(usrInput, command, cmdArgs, stdin_redirect, stdout_redirect, stderr_redirect,
-                        saved_stdin, saved_stdout, saved_stderr, active_pipe, &pipe_pgid, 1, pipe_fds, temp_fds_holder, 0, RUNNING);
-                    if (exec_status == -1) {
-                        cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
-                        exit(1);
-                    }
-                    if (exec_status == -2) break;
-                    commandSaved = 0;
-                    for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
-                    cmdArgsIndex = 0;
-                    active_pipe = 1;
-                } else if ( strcmp(token, "&") == 0 ) {
-                    int exec_status = execute_command(usrInput, command, cmdArgs, stdin_redirect, stdout_redirect, stderr_redirect,
-                        saved_stdin, saved_stdout, saved_stderr, active_pipe, &pipe_pgid, 0, pipe_fds, NULL, 1, RUNNING);
-                    if (exec_status == -1) {
-                        cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
-                        exit(1);
-                    }
-                    if (exec_status == -2) break;
-                    commandSaved = 0;
-                    for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
-                    cmdArgsIndex = 0;
-                } else {
-                    cmdArgsIndex++;
-                    if (cmdArgsIndex > (cmdArgsCount - 1)) { // -1 for NULL
-                        cmdArgsCount+=5;
-                        char** temp = realloc(cmdArgs, sizeof(char*) * (cmdArgsCount)); // WARNING: Allocated memory is leaked
-                        if (temp == NULL) {
-                            cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
-                            exit(1);
-                        }
-                        cmdArgs = temp;
-
-                    }
-                    char* arg_copy = strdup(token);
-                    cmdArgs[cmdArgsIndex - 1] = arg_copy;
-                }
-            }
-            cmdArgs[cmdArgsIndex] = NULL;
-            if (!commandExecuted && commandSaved) {
-                int exec_status = execute_command(usrInput, command, cmdArgs, stdin_redirect, stdout_redirect, stderr_redirect,
-                        saved_stdin, saved_stdout, saved_stderr, active_pipe, &pipe_pgid, 0, pipe_fds, NULL, 0, RUNNING);
-                if (exec_status == -1) {
-                    cleanup(cmdArgsIndex, cmdArgs, usrInputCopy, usrInput);
-                    exit(1);
-                }
-            }
-            for (int i = 0; i < cmdArgsIndex; i++) free(cmdArgs[i]);
-        }
-        free(usrInputCopy);
         free(usrInput);
     }
-    free_jobs(&jobs_head);
-    free(cmdArgs);
+    free_jobs(&job_head);
     return 0;
 }
